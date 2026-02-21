@@ -1,0 +1,23 @@
+services:
+  facade-service:
+    build:
+      context: .
+      dockerfile: facade/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - LOGGING_URL=http://logging-service:8000
+      - COUNTER_URL=http://counter-service:8000
+    depends_on:
+      - logging-service
+      - counter-service
+
+  logging-service:
+    build:
+      context: .
+      dockerfile: logging/Dockerfile
+
+  counter-service:
+    build:
+      context: .
+      dockerfile: counter/Dockerfile
