@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hazelcast xmlns="http://www.hazelcast.com/schema/config"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://www.hazelcast.com/schema/config
+           http://www.hazelcast.com/schema/config/hazelcast-config-6.0.xsd">
+    <cluster-name>dev</cluster-name>
+    <network>
+        <join>
+            <tcp-ip enabled="true">
+                <member>127.0.0.1:5701</member>
+                <member>127.0.0.1:5702</member>
+                <member>127.0.0.1:5703</member>
+            </tcp-ip>
+        </join>
+    </network>
+
+    <queue name="demo_queue">
+        <max-size>10</max-size>
+    </queue>
+</hazelcast>
