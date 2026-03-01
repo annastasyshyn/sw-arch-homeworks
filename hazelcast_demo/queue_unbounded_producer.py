@@ -1,4 +1,3 @@
-"""Producer for unbounded queue: writes 1..100 and sentinel -1. put() never blocks."""
 import hazelcast
 
 QUEUE_NAME = "demo_queue_unbounded"

@@ -1,4 +1,3 @@
-"""Increment counter using optimistic locking (replace_if_same)."""
 import hazelcast
 import threading
 import time

@@ -1,4 +1,3 @@
-"""Bounded queue demo: one writer and two readers in parallel (demo_queue, max 10)."""
 from hazelcast import HazelcastClient
 import threading
 

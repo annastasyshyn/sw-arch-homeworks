@@ -1,4 +1,3 @@
-"""Fill the distributed map with 1000 entries."""
 import hazelcast
 
 if __name__ == "__main__":

@@ -1,4 +1,3 @@
-"""Increment counter using pessimistic locking (lock/unlock)."""
 import hazelcast
 import threading
 import time

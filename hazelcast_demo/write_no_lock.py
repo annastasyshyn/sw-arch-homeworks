@@ -1,4 +1,3 @@
-"""Increment counter in distributed map without locking (race condition demo)."""
 import hazelcast
 import threading
 import time

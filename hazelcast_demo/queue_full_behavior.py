@@ -1,4 +1,3 @@
-"""Demonstrate bounded queue: put() blocks when queue is full and no consumer reads."""
 import hazelcast
 import threading
 import time

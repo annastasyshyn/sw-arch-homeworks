@@ -1,4 +1,3 @@
-"""Consumer for unbounded queue: take() until sentinel -1. Each take() reads one element immediately."""
 import hazelcast
 import sys
 
