@@ -35,7 +35,7 @@ docker compose up -d --build
 ./scripts/post_10_get.sh
 ```
 
-<img src="screenshots/imagepng" alt="10 POST + GET" />
+<img src="assets/image.png" alt="10 POST + GET" />
 
 Переглянути, **який екземпляр logging** обробив запити:
 
@@ -90,7 +90,7 @@ docker compose stop logging-service-2 logging-service-3
 curl -sS -X POST "http://localhost:8000/transaction" -H "Content-Type: application/json" -d '{"user_id":"User1","amount":1}' && echo && curl -sS "http://localhost:8000/user/User1" && echo && curl -sS "http://localhost:8000/accounts"
 ```
 
-<img src="screenshots/image1.png" alt="10 POST + GET" />
+<img src="assets/image1.png" alt="10 POST + GET" />
 
 POST /transaction успішний, адже повернувся transaction_id і новий balance: 57.
 Обидва GET теж успішні:
@@ -111,7 +111,7 @@ docker compose stop hazelcast-2 hazelcast-3
 curl -sS -X POST "http://localhost:8000/transaction" -H "Content-Type: application/json" -d '{"user_id":"User1","amount":1}' && echo && curl -sS "http://localhost:8000/user/User1" && echo && curl -sS "http://localhost:8000/accounts"
 ```
 
-<img src="screenshots/image2.png" alt="10 POST + GET" />
+<img src="assets/image2.png" alt="10 POST + GET" />
 
 POST /transaction успішний:{"transaction_id":"3808635e-a707-4a83-92d6-ef04f7ecc537","balance":58}
 GET /user/User1 успішний, повертає balance: 58
@@ -144,7 +144,7 @@ curl -s http://localhost:8000/metrics | python3 -m json.tool
 |3| Independent | 258.11 | 387.43|
 |3| Conflict | 271.26 | 368.65 |
 
-<img src="screenshots/image3.png" />
-<img src="screenshots/image4.png" />
+<img src="assets/image3.png" />
+<img src="assets/image4.png" />
 
-Hazelcast-версія дала кращу доступність/стійкість і правильну архітектуру з distributed storage, але явного приросту часу не показала (що можна спостерігати в таблиці вище), що очікувано через синхронні міжсервісні виклики і мережеві накладні витрати.”
+Hazelcast-версія дала кращу доступність/стійкість і правильну архітектуру з distributed storage, але явного приросту часу не показала (що видно в таблиці вище), що очікувано через синхронні міжсервісні виклики і мережеві накладні витрати.
