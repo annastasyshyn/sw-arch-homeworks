@@ -1,5 +1,6 @@
 import asyncio
 import os
+import random
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -9,7 +10,21 @@ import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-LOGGING_URL = os.getenv("LOGGING_URL", "http://logging-service:8000")
+_DEFAULT_LOGGING_URLS = (
+    "http://logging-service-1:8000,"
+    "http://logging-service-2:8000,"
+    "http://logging-service-3:8000"
+)
+
+
+def _logging_urls() -> List[str]:
+    raw = os.getenv("LOGGING_URLS", _DEFAULT_LOGGING_URLS)
+    parsed = [u.strip() for u in raw.split(",") if u.strip()]
+    if parsed:
+        return parsed
+    return [u.strip() for u in _DEFAULT_LOGGING_URLS.split(",") if u.strip()]
+
+
 COUNTER_URL = os.getenv("COUNTER_URL", "http://counter-service:8000")
 
 
@@ -77,6 +92,7 @@ class Metrics:
 async def lifespan(app: FastAPI):
     app.state.metrics = Metrics()
     app.state.client = httpx.AsyncClient()
+    app.state.logging_urls = _logging_urls()
     try:
         yield
     finally:
@@ -86,11 +102,45 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+def _shuffled_urls(urls: List[str]) -> List[str]:
+    out = list(urls)
+    random.shuffle(out)
+    return out
+
+
 async def request_json(
     method: str, url: str, payload: Dict[str, Any] | None = None
 ) -> httpx.Response:
     client: httpx.AsyncClient = app.state.client
     return await client.request(method, url, json=payload, timeout=10.0)
+
+
+async def logging_request(
+    method: str,
+    path: str,
+    payload: Dict[str, Any] | None = None,
+) -> httpx.Response:
+    """Call one of the logging services; on failure try next until success or all failed."""
+    urls = app.state.logging_urls
+    if not urls:
+        raise ValueError("No LOGGING_URLS configured")
+    ordered = _shuffled_urls(urls)
+    last_error: Exception | None = None
+    for base in ordered:
+        url = f"{base.rstrip('/')}{path}"
+        try:
+            resp = await request_json(method, url, payload)
+            if resp.is_success:
+                return resp
+            last_error = httpx.HTTPStatusError(
+                f"HTTP {resp.status_code}", request=resp.request, response=resp
+            )
+        except Exception as e:
+            last_error = e
+            continue
+    if last_error:
+        raise last_error
+    raise RuntimeError("No logging service available")
 
 
 @app.post("/transaction", response_model=TransactionOut)
@@ -107,7 +157,7 @@ async def create_transaction(payload: TransactionIn) -> TransactionOut:
     metrics: Metrics = app.state.metrics
 
     start = time.perf_counter()
-    logging_resp = await request_json("POST", f"{LOGGING_URL}/log", message)
+    logging_resp = await logging_request("POST", "/log", message)
     await metrics.add_logging(time.perf_counter() - start)
     logging_resp.raise_for_status()
 
@@ -134,7 +184,7 @@ async def get_user_summary(user_id: str) -> UserSummary:
     await metrics.add_counter(time.perf_counter() - start)
 
     start = time.perf_counter()
-    logs_resp = await request_json("GET", f"{LOGGING_URL}/logs")
+    logs_resp = await logging_request("GET", "/logs")
     await metrics.add_logging(time.perf_counter() - start)
 
     balance_resp.raise_for_status()
