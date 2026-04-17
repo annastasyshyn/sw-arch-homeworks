@@ -4,12 +4,16 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict
 
+import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
 
 from hazelcast.asyncio import HazelcastClient
 
 INSTANCE_ID = os.getenv("LOGGING_INSTANCE_ID", str(uuid.uuid4())[:8])
+CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "").rstrip("/")
+SERVICE_BASE_URL = os.getenv("SERVICE_BASE_URL", "").rstrip("/")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "logging-service")
 HAZELCAST_MEMBERS = os.getenv(
     "HAZELCAST_MEMBERS", "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
 ).split(",")
@@ -37,6 +41,30 @@ def _deserialize(value: Any) -> Dict[str, Any]:
     return dict(value)
 
 
+async def _register_with_config() -> None:
+    if not CONFIG_SERVER_URL or not SERVICE_BASE_URL:
+        print(
+            f"[logging-service instance {INSTANCE_ID}] "
+            "skipping config registration (missing CONFIG_SERVER_URL or SERVICE_BASE_URL)"
+        )
+        return
+    url = f"{CONFIG_SERVER_URL}/register"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                json={"service": SERVICE_NAME, "url": SERVICE_BASE_URL},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+        print(
+            f"[logging-service instance {INSTANCE_ID}] "
+            f"registered at config-server as {SERVICE_BASE_URL!r}"
+        )
+    except Exception as e:
+        print(f"[logging-service instance {INSTANCE_ID}] config registration failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -51,6 +79,7 @@ async def lifespan(app: FastAPI):
         raise
     app.state.hz_client = hz_client
     app.state.logs_map = logs_map
+    await _register_with_config()
     try:
         yield
     finally:

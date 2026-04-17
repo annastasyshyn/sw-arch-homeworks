@@ -65,16 +65,24 @@ def main() -> None:
     print(f"Total time (s): {duration:.2f}")
     print(f"Throughput (req/s): {throughput:.2f}")
 
+    time.sleep(3.0)
+
     if args.scenario == "independent":
         resp = requests.get(f"{args.base_url}/accounts", timeout=30)
         resp.raise_for_status()
-        balances = resp.json().get("balances", {})
+        balances = resp.json().get("balances")
+        if balances is None:
+            print("Balances unavailable (counter down or still draining the queue)")
+            return
         ok = all(balances.get(user, 0) == expected_total for user in users)
         print(f"Balances OK: {ok}")
     else:
         resp = requests.get(f"{args.base_url}/user/User1", timeout=30)
         resp.raise_for_status()
-        balance = resp.json().get("balance", 0)
+        balance = resp.json().get("balance")
+        if balance is None:
+            print("User1 balance unavailable (counter down or still draining the queue)")
+            return
         print(f"User1 balance: {balance} (expected {expected_total})")
 
 

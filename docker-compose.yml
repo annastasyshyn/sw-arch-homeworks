@@ -1,4 +1,11 @@
 services:
+  config-server:
+    build:
+      context: .
+      dockerfile: config_server/Dockerfile
+    ports:
+      - "8888:8888"
+
   facade-service:
     build:
       context: .
@@ -6,9 +13,22 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - LOGGING_URLS=http://logging-service-1:8000,http://logging-service-2:8000,http://logging-service-3:8000
-      - COUNTER_URL=http://counter-service:8000
+      - CONFIG_SERVER_URL=http://config-server:8888
+      - LOGGING_SERVICE_NAME=logging-service
+      - COUNTER_SERVICE_NAME=counter-service
+      - HAZELCAST_MEMBERS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+      - HZ_CLUSTER_NAME=dev
+      - HZ_QUEUE_NAME=counter-updates
+      - COUNTER_HTTP_TIMEOUT=3.0
     depends_on:
+      config-server:
+        condition: service_started
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
       logging-service-1:
         condition: service_started
       logging-service-2:
@@ -26,10 +46,18 @@ services:
       - LOGGING_INSTANCE_ID=logging-1
       - HAZELCAST_MEMBERS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
       - HZ_CLUSTER_NAME=dev
+      - CONFIG_SERVER_URL=http://config-server:8888
+      - SERVICE_NAME=logging-service
+      - SERVICE_BASE_URL=http://logging-service-1:8000
     depends_on:
-      - hazelcast-1
-      - hazelcast-2
-      - hazelcast-3
+      config-server:
+        condition: service_started
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
 
   logging-service-2:
     build:
@@ -39,10 +67,18 @@ services:
       - LOGGING_INSTANCE_ID=logging-2
       - HAZELCAST_MEMBERS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
       - HZ_CLUSTER_NAME=dev
+      - CONFIG_SERVER_URL=http://config-server:8888
+      - SERVICE_NAME=logging-service
+      - SERVICE_BASE_URL=http://logging-service-2:8000
     depends_on:
-      - hazelcast-1
-      - hazelcast-2
-      - hazelcast-3
+      config-server:
+        condition: service_started
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
 
   logging-service-3:
     build:
@@ -52,10 +88,18 @@ services:
       - LOGGING_INSTANCE_ID=logging-3
       - HAZELCAST_MEMBERS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
       - HZ_CLUSTER_NAME=dev
+      - CONFIG_SERVER_URL=http://config-server:8888
+      - SERVICE_NAME=logging-service
+      - SERVICE_BASE_URL=http://logging-service-3:8000
     depends_on:
-      - hazelcast-1
-      - hazelcast-2
-      - hazelcast-3
+      config-server:
+        condition: service_started
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
 
   hazelcast-1:
     image: hazelcast/hazelcast:5.6.0
@@ -90,7 +134,21 @@ services:
       dockerfile: counter/Dockerfile
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/postgres
+      - CONFIG_SERVER_URL=http://config-server:8888
+      - SERVICE_NAME=counter-service
+      - SERVICE_BASE_URL=http://counter-service:8000
+      - HAZELCAST_MEMBERS=hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701
+      - HZ_CLUSTER_NAME=dev
+      - HZ_QUEUE_NAME=counter-updates
     depends_on:
+      config-server:
+        condition: service_started
+      hazelcast-1:
+        condition: service_started
+      hazelcast-2:
+        condition: service_started
+      hazelcast-3:
+        condition: service_started
       postgres:
         condition: service_healthy
     healthcheck:
@@ -98,7 +156,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-      start_period: 10s
+      start_period: 15s
 
   postgres:
     image: postgres:16-alpine
