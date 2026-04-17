@@ -1,4 +1,14 @@
-# Task 3 report
+# Task 4
+
+<img src="assets/docker_ps.png" alt="docker ps" />
+
+<img src="assets/post.png" alt="post" />
+
+<img src="assets/get.png" alt="get" />
+
+<img src="assets/logs.png" alt="logs" />
+
+## Task 3 report (OLD)
 
 Три екземпляри **logging-service** (окремі контейнери), кластер **Hazelcast** (3 ноди), **PostgreSQL** для балансів у **counter-service**, **facade** випадково обирає logging і при збої переходить до наступного.
 
