@@ -5,7 +5,6 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 _lock = threading.Lock()
-# service name -> ordered unique base URLs (no trailing slash)
 REGISTRY: Dict[str, List[str]] = {}
 
 
