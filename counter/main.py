@@ -67,24 +67,52 @@ def _consumer_loop(
     shutdown: threading.Event,
 ) -> None:
     print(f"[counter-service] queue consumer starting queue={QUEUE_NAME!r}")
-    hz = hazelcast.HazelcastClient(
-        cluster_members=HAZELCAST_MEMBERS,
-        cluster_name=HZ_CLUSTER_NAME,
-    )
-    try:
-        q = hz.get_queue(QUEUE_NAME).blocking()
-        while not shutdown.is_set():
-            item = q.poll(1.0)
-            if item is None:
-                continue
-            try:
-                fut = asyncio.run_coroutine_threadsafe(_apply_queued_item(pool, item), loop)
-                fut.result(timeout=120)
-            except Exception as e:
-                print(f"[counter-service] queue item failed: {e}")
-    finally:
-        hz.shutdown()
-        print("[counter-service] queue consumer stopped")
+    reconnect_delay_seconds = 1.0
+    max_reconnect_delay_seconds = 10.0
+    while not shutdown.is_set():
+        hz = None
+        try:
+            hz = hazelcast.HazelcastClient(
+                cluster_members=HAZELCAST_MEMBERS,
+                cluster_name=HZ_CLUSTER_NAME,
+            )
+            q = hz.get_queue(QUEUE_NAME).blocking()
+            reconnect_delay_seconds = 1.0
+            print("[counter-service] queue consumer connected to Hazelcast")
+            while not shutdown.is_set():
+                try:
+                    item = q.poll(1.0)
+                except Exception as e:
+                    if not shutdown.is_set():
+                        print(f"[counter-service] queue poll failed, reconnecting: {e}")
+                    break
+                if item is None:
+                    continue
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(_apply_queued_item(pool, item), loop)
+                    fut.result(timeout=120)
+                except Exception as e:
+                    print(f"[counter-service] queue item failed: {e}")
+        except Exception as e:
+            if not shutdown.is_set():
+                print(f"[counter-service] queue consumer connection failed: {e}")
+        finally:
+            if hz is not None:
+                try:
+                    hz.shutdown()
+                except Exception:
+                    pass
+        if shutdown.is_set():
+            break
+        print(
+            f"[counter-service] queue consumer retry in {reconnect_delay_seconds:.1f}s"
+        )
+        shutdown.wait(reconnect_delay_seconds)
+        reconnect_delay_seconds = min(
+            reconnect_delay_seconds * 2.0,
+            max_reconnect_delay_seconds,
+        )
+    print("[counter-service] queue consumer stopped")
 
 
 async def _register_with_config() -> None:
