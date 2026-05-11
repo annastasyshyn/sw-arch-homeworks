@@ -1,95 +1,111 @@
-# Lab 4: Мікросервіси з Messaging Queue
+# Lab 5
+## Setup
 
-Відповідні скріншоти у папці `assets/`.
-
-## Архітектура
-
-- `facade-service`:
-  - приймає клієнтські `POST/GET`;
-  - для `POST` пише лог у `logging-service` і кладе update-повідомлення в Hazelcast Queue `counter-updates`;
-  - для `GET` читає баланс із `counter-service`, логи з `logging-service`.
-- `counter-service`:
-  - consumer Hazelcast Queue (producer/consumer схема);
-  - застосовує транзакції до PostgreSQL.
-- `logging-service-1/2/3`:
-  - отримують `POST /log`;
-  - зберігають логи в Hazelcast Distributed Map `logs`.
-- `config-server`:
-  - тримає in-memory registry адрес сервісів;
-  - повертає список інстансів за іменем сервісу.
-- `hazelcast-1/2/3`:
-  - кластер MQ/Data Grid.
-
-## Запуск
+Зайти у minikube:
 
 ```bash
-git checkout micro_mq
-docker compose up -d --build
+minikube start --cpus=4 --memory=7638 --driver=docker
+minikube status
+kubectl cluster-info
+```  
+
+Білд імеджів:  
+
+```bash
+docker build -t lab5/facade-service:latest  -f facade/Dockerfile  .
+docker build -t lab5/counter-service:latest -f counter/Dockerfile .
+docker build -t lab5/logging-service:latest -f logging/Dockerfile .
+
+minikube image load lab5/facade-service:latest
+minikube image load lab5/counter-service:latest
+minikube image load lab5/logging-service:latest
 ```
 
-Перевірка контейнерів:
+Розгорнути все:
 
 ```bash
-docker compose ps
+kubectl apply -k k8s
+kubectl -n lab5 get all
 ```
 
-## Базова перевірка: 10 POST + GET
+Подивитися як піднімаються поди:
 
 ```bash
-./scripts/post_10_get.sh
+kubectl -n lab5 get pods -w
 ```
 
-- `POST /transaction` повертає `{"transaction_id":"...","balance":null}` (асинхронно);
-- `GET /user/User1` повертає коректний баланс і список транзакцій;
-- `GET /accounts` повертає коректні агреговані баланси.
-
-## Перевірка розподілу між logging-instance
+Коли усі поди `Running` і `Ready`, прокинути facade на localhost:
 
 ```bash
-docker compose logs logging-service-1 logging-service-2 logging-service-3
+kubectl -n lab5 port-forward svc/facade-service 8000:8000
 ```
 
-У логах  записи `Received POST /log ...` у трьох інстансах.
-
-## Перевірка відмовостійкості counter-service
-
-1. Поставити `counter-service` на паузу:
+Швидка перевірка:
 
 ```bash
-docker compose pause counter-service
-```
+curl -sS http://localhost:8000/health
+curl -sS http://localhost:8000/services 
 
-Відправити транзакції через facade:
-
-```bash
-curl -sS -X POST "http://localhost:8000/transaction" \
+curl -sS -X POST http://localhost:8000/transaction \
   -H "Content-Type: application/json" \
-  -d '{"user_id":"UserPaused","amount":11}'
+  -d '{"user_id":"u1","amount":5}'
 
-curl -sS -X POST "http://localhost:8000/transaction" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":"UserPaused","amount":22}'
+curl -sS http://localhost:8000/user/u1
+curl -sS http://localhost:8000/accounts
 ```
 
-Перевірити `GET` під час недоступності counter:
+## Failover test
+
+В одному терміналі тримаємо port-forward, у другому -- слідкуємо за подами, у третьому -- гонимо клієнта, у четвертому -- вбиваємо інстанси.
 
 ```bash
-curl -sS "http://localhost:8000/user/UserPaused"
-curl -sS "http://localhost:8000/accounts"
+kubectl -n lab5 port-forward svc/facade-service 8000:8000
+
+kubectl -n lab5 get pods -w
+
+python failover_client.py --workers 2 --interval 0.2 --print-services-every 5
 ```
 
-Очікувано: `balance: null`, `balances: null`.
-
-Відновити `counter-service`:
+У T4 одним з варіантів видаляємо/перезапускаємо інстанс:
 
 ```bash
-docker compose unpause counter-service
-sleep 4
+# logging kill one pod
+kubectl -n lab5 delete pod $(kubectl -n lab5 get pod -l app=logging-service -o jsonpath='{.items[0].metadata.name}') --grace-period=1
+
+# counter kill one pod
+kubectl -n lab5 delete pod $(kubectl -n lab5 get pod -l app=counter-service -o jsonpath='{.items[0].metadata.name}') --grace-period=1
+
+# scale до нуля і назад -- щоб побачити NotReady у /services
+kubectl -n lab5 scale deploy/logging-service --replicas=1
+kubectl -n lab5 scale deploy/logging-service --replicas=3
 ```
 
-Перевірити, що черга догнана:
+Результати failover тесту:
 
-```bash
-curl -sS "http://localhost:8000/user/UserPaused"
-docker compose logs --since 5m counter-service
-```
+1) Початковий стан: сервіси відповідають, усі інстанси `Ready`.
+
+![Failover initial state](./assets/failover_init.png)
+
+2) Видалення одного pod `logging-service`: клієнт продовжує роботу, Kubernetes запускає новий pod.
+
+![Failover after killing logging pod](./assets/failover_kill_logging.png)
+
+3) Видалення одного pod `counter-service`: запити далі обробляються, сервіс відновлює репліку.
+
+![Failover after killing counter pod](./assets/failover_kill_counter.png)
+
+4) Масштабування і деградація: при зменшенні реплік видно зміни у статусах `/services` (NotReady/менше інстансів).
+
+![Failover scale down effect](./assets/failover_scale_then_kill.png)
+
+5) Відновлення після масштабування назад: повернення до стабільного стану з усіма репліками.
+
+![Failover recovery after scaling up](./assets/failover_scale_recover.png)
+
+
+## Performance test
+
+| Test scenarios | Task 1 (in-mem) | Task 3 (DB) | Task 5 (K8s) |
+| :--- | :--- | :--- | :--- |
+| **10 accounts (independent)** | Total time: `167.39s`<br><br>logging-service contribution: `50.43%`<br><br>counter-service contribution: `49.57%` | Total time: `258.11s`<br><br>logging-service contribution: `35.14%`<br><br>counter-service contribution: `64.86%` | Total time: `295.36s`<br><br>logging-service contribution: `43.24%`<br><br>counter-service contribution: `56.76%` |
+| **1 account (conflict)** | Total time: `174.86s`<br><br>logging-service contribution: `49.91%`<br><br>counter-service contribution: `50.09%` | Total time: `271.26s`<br><br>logging-service contribution: `34.76%`<br><br>counter-service contribution: `65.24%` | Total time: `338.57s`<br><br>logging-service contribution: `45.62%`<br><br>counter-service contribution: `54.38%` |

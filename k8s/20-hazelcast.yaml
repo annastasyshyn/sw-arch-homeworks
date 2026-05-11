@@ -1,0 +1,103 @@
+# 3-node Hazelcast cluster that plays a double role here:
+#   * data grid for the logging-service (it stores the transactions
+#     map there);
+#   * message broker — facade-service pushes counter updates onto a
+#     Hazelcast Queue, which counter-service consumes.
+#
+# Members use the Hazelcast Kubernetes plugin to discover each other,
+# and clients (logging / facade / counter) connect via the headless
+# Service DNS names that are pinned in the ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hazelcast-config
+  namespace: lab5
+data:
+  hazelcast-docker.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <hazelcast xmlns="http://www.hazelcast.com/schema/config"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://www.hazelcast.com/schema/config
+               http://www.hazelcast.com/schema/config/hazelcast-config-5.6.xsd">
+      <cluster-name>dev</cluster-name>
+      <network>
+        <join>
+          <multicast enabled="false"/>
+          <kubernetes enabled="true">
+            <namespace>lab5</namespace>
+            <service-name>hazelcast-headless</service-name>
+          </kubernetes>
+        </join>
+      </network>
+    </hazelcast>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hazelcast-headless
+  namespace: lab5
+spec:
+  clusterIP: None
+  selector:
+    app: hazelcast
+  ports:
+    - name: hazelcast
+      protocol: TCP
+      port: 5701
+      targetPort: hazelcast
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hazelcast
+  namespace: lab5
+spec:
+  serviceName: hazelcast-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hazelcast
+  template:
+    metadata:
+      labels:
+        app: hazelcast
+    spec:
+      serviceAccountName: lab5-sa
+      containers:
+        - name: hazelcast
+          image: hazelcast/hazelcast:5.6.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: hazelcast
+              containerPort: 5701
+          env:
+            - name: HZ_CLUSTERNAME
+              value: dev
+            - name: HZ_NETWORK_JOIN_MULTICAST_ENABLED
+              value: "false"
+            - name: HZ_NETWORK_JOIN_KUBERNETES_ENABLED
+              value: "true"
+            - name: HZ_NETWORK_JOIN_KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HZ_NETWORK_JOIN_KUBERNETES_SERVICENAME
+              value: hazelcast-headless
+          volumeMounts:
+            - name: hazelcast-config
+              mountPath: /opt/hazelcast/config/hazelcast-docker.xml
+              subPath: hazelcast-docker.xml
+          readinessProbe:
+            tcpSocket:
+              port: hazelcast
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: hazelcast
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: hazelcast-config
+          configMap:
+            name: hazelcast-config

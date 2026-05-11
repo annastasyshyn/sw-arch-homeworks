@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: facade-service
+  namespace: lab5
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: facade-service
+  template:
+    metadata:
+      labels:
+        app: facade-service
+    spec:
+      serviceAccountName: lab5-sa
+      containers:
+        - name: facade-service
+          image: lab5/facade-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: facade-service
+            - name: APP_CONFIGMAP_NAME
+              value: microservices-config
+            - name: K8S_DISCOVERY_TTL_SEC
+              value: "5.0"
+            - name: LOGGING_SERVICE_NAME
+              value: logging-service
+            - name: LOGGING_SERVICE_PORT_NAME
+              value: http
+            - name: COUNTER_SERVICE_NAME
+              value: counter-service
+            - name: COUNTER_SERVICE_PORT_NAME
+              value: http
+            - name: FACADE_SERVICE_PORT_NAME
+              value: http
+            - name: INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: facade-service
+  namespace: lab5
+spec:
+  selector:
+    app: facade-service
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: http

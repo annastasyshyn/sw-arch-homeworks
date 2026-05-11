@@ -1,0 +1,26 @@
+# Acts as the "Config Server" — every value the microservices need
+# (Hazelcast cluster name / member addresses / map name / queue name)
+# lives here as plain key/value entries. Services read these on
+# startup via the Kubernetes API (see k8s_client.py).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: microservices-config
+  namespace: lab5
+data:
+  hazelcast.cluster_name: dev
+  hazelcast.members: "hazelcast-0.hazelcast-headless.lab5.svc.cluster.local:5701,hazelcast-1.hazelcast-headless.lab5.svc.cluster.local:5701,hazelcast-2.hazelcast-headless.lab5.svc.cluster.local:5701"
+  hazelcast.map_name: logs
+  hazelcast.queue_name: counter-updates
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: microservices-secrets
+  namespace: lab5
+type: Opaque
+stringData:
+  DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+  POSTGRES_DB: postgres
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres

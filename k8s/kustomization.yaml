@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: lab5
+resources:
+  - 00-namespace.yaml
+  - 01-config.yaml
+  - 02-rbac.yaml
+  - 10-postgres.yaml
+  - 20-hazelcast.yaml
+  - 30-logging.yaml
+  - 40-counter.yaml
+  - 50-facade.yaml
