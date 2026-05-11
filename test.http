@@ -1,0 +1,30 @@
+### health
+GET http://localhost:8000/health
+
+### discovered services (= what facade reads from K8s endpoints)
+GET http://localhost:8000/services
+
+### same user three times (for conflict scenario / failover replay)
+POST http://localhost:8000/transaction
+Content-Type: application/json
+
+{
+  "user_id": "u1",
+  "amount": 10
+}
+
+###
+POST http://localhost:8000/transaction
+Content-Type: application/json
+
+{
+  "user_id": "u1",
+  "amount": 20
+}
+
+
+### get u1 (after the three POSTs above expect 60)
+GET http://localhost:8000/user/u1
+
+### get all balances
+GET http://localhost:8000/accounts
