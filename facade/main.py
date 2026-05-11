@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import random
-import socket
 import threading
 import time
 import uuid
@@ -11,31 +10,40 @@ from typing import Any, Dict, List
 
 import hazelcast
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 
-from k8s_client import KubernetesApiClient, ServiceInstance
+_DEFAULT_LOGGING_URLS = (
+    "http://logging-service-1:8000,"
+    "http://logging-service-2:8000,"
+    "http://logging-service-3:8000"
+)
 
 
-SERVICE_NAME = os.getenv("SERVICE_NAME", "facade-service")
-INSTANCE_ID = os.getenv("INSTANCE_ID", os.getenv("POD_NAME", socket.gethostname()))
-CONFIGMAP_NAME = os.getenv("APP_CONFIGMAP_NAME", "microservices-config")
+def _logging_urls_from_env() -> List[str]:
+    raw = os.getenv("LOGGING_URLS", _DEFAULT_LOGGING_URLS)
+    parsed = [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
+    if parsed:
+        return parsed
+    return [u.strip().rstrip("/") for u in _DEFAULT_LOGGING_URLS.split(",") if u.strip()]
 
+
+CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "").rstrip("/")
 LOGGING_SERVICE_NAME = os.getenv("LOGGING_SERVICE_NAME", "logging-service")
 COUNTER_SERVICE_NAME = os.getenv("COUNTER_SERVICE_NAME", "counter-service")
-LOGGING_SERVICE_PORT_NAME = os.getenv("LOGGING_SERVICE_PORT_NAME", "http")
-COUNTER_SERVICE_PORT_NAME = os.getenv("COUNTER_SERVICE_PORT_NAME", "http")
-FACADE_SERVICE_PORT_NAME = os.getenv("FACADE_SERVICE_PORT_NAME", "http")
-
 COUNTER_HTTP_TIMEOUT = float(os.getenv("COUNTER_HTTP_TIMEOUT", "3.0"))
-LOGGING_HTTP_TIMEOUT = float(os.getenv("LOGGING_HTTP_TIMEOUT", "10.0"))
-
+HAZELCAST_MEMBERS = [
+    m.strip()
+    for m in os.getenv(
+        "HAZELCAST_MEMBERS", "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
+    ).split(",")
+    if m.strip()
+]
+HZ_CLUSTER_NAME = os.getenv("HZ_CLUSTER_NAME", "dev")
+HZ_QUEUE_NAME = os.getenv("HZ_QUEUE_NAME", "counter-updates")
 
 _hz_lock = threading.Lock()
 _hz_client: hazelcast.HazelcastClient | None = None
-_hz_members: list[str] = []
-_hz_cluster_name: str = "dev"
-_hz_queue_name: str = "counter-updates"
 
 
 def _shutdown_hz_client() -> None:
@@ -54,16 +62,12 @@ def _enqueue_counter_message(payload: Dict[str, Any]) -> None:
     with _hz_lock:
         if _hz_client is None:
             _hz_client = hazelcast.HazelcastClient(
-                cluster_members=_hz_members,
-                cluster_name=_hz_cluster_name,
+                cluster_members=HAZELCAST_MEMBERS,
+                cluster_name=HZ_CLUSTER_NAME,
             )
-        queue = _hz_client.get_queue(_hz_queue_name).blocking()
+        queue = _hz_client.get_queue(HZ_QUEUE_NAME).blocking()
         queue.put(serialized)
-    print(
-        f"[{INSTANCE_ID}] enqueued counter update "
-        f"transaction_id={payload.get('transaction_id')!r} queue={_hz_queue_name!r}",
-        flush=True,
-    )
+    print(f"[facade] enqueued counter update transaction_id={payload.get('transaction_id')!r}")
 
 
 class TransactionIn(BaseModel):
@@ -128,66 +132,62 @@ class Metrics:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _hz_members, _hz_cluster_name, _hz_queue_name
-
-    print(f"[{INSTANCE_ID}] Starting facade-service ...", flush=True)
-
     app.state.metrics = Metrics()
     app.state.client = httpx.AsyncClient()
-    app.state.k8s = KubernetesApiClient()
-
-    cluster_name = await app.state.k8s.get_config_value_with_retry(
-        CONFIGMAP_NAME, "hazelcast.cluster_name"
-    )
-    members_raw = await app.state.k8s.get_config_value_with_retry(
-        CONFIGMAP_NAME, "hazelcast.members"
-    )
-    queue_name = await app.state.k8s.get_config_value_with_retry(
-        CONFIGMAP_NAME, "hazelcast.queue_name"
-    )
-    _hz_cluster_name = cluster_name
-    _hz_members = [m.strip() for m in members_raw.split(",") if m.strip()]
-    _hz_queue_name = queue_name
-    print(
-        f"[{INSTANCE_ID}] Loaded MQ config from ConfigMap '{CONFIGMAP_NAME}': "
-        f"cluster_name={cluster_name!r} members={_hz_members} queue={queue_name!r}",
-        flush=True,
-    )
-
     try:
         yield
     finally:
         await app.state.client.aclose()
-        await app.state.k8s.close()
         await asyncio.to_thread(_shutdown_hz_client)
-        print(f"[{INSTANCE_ID}] Shutdown complete", flush=True)
 
 
 app = FastAPI(lifespan=lifespan)
 
 
-def _shuffled(values: List[str]) -> List[str]:
-    out = list(values)
+def _shuffled_urls(urls: List[str]) -> List[str]:
+    out = list(urls)
     random.shuffle(out)
     return out
 
 
-async def discover_logging_urls() -> List[str]:
-    k8s: KubernetesApiClient = app.state.k8s
-    return await k8s.discover_service_addresses(
-        LOGGING_SERVICE_NAME,
-        port_name=LOGGING_SERVICE_PORT_NAME,
-        scheme="http",
-    )
+async def request_json(
+    method: str, url: str, payload: Dict[str, Any] | None = None, timeout: float = 10.0
+) -> httpx.Response:
+    client: httpx.AsyncClient = app.state.client
+    return await client.request(method, url, json=payload, timeout=timeout)
 
 
-async def discover_counter_urls() -> List[str]:
-    k8s: KubernetesApiClient = app.state.k8s
-    return await k8s.discover_service_addresses(
-        COUNTER_SERVICE_NAME,
-        port_name=COUNTER_SERVICE_PORT_NAME,
-        scheme="http",
-    )
+async def _instances_from_config(service_name: str) -> List[str]:
+    if not CONFIG_SERVER_URL:
+        return []
+    client: httpx.AsyncClient = app.state.client
+    try:
+        resp = await client.get(
+            f"{CONFIG_SERVER_URL}/instances/{service_name}",
+            timeout=5.0,
+        )
+        if not resp.is_success:
+            return []
+        data = resp.json().get("instances") or []
+        return [str(u).rstrip("/") for u in data if str(u).strip()]
+    except Exception as e:
+        print(f"[facade] config-server lookup {service_name!r} failed: {e}")
+        return []
+
+
+async def logging_instance_urls() -> List[str]:
+    urls = await _instances_from_config(LOGGING_SERVICE_NAME)
+    if urls:
+        return urls
+    return _logging_urls_from_env()
+
+
+async def counter_instance_urls() -> List[str]:
+    urls = await _instances_from_config(COUNTER_SERVICE_NAME)
+    if urls:
+        return urls
+    u = os.getenv("COUNTER_URL", "").strip().rstrip("/")
+    return [u] if u else []
 
 
 async def logging_request(
@@ -195,60 +195,37 @@ async def logging_request(
     path: str,
     payload: Dict[str, Any] | None = None,
 ) -> httpx.Response:
-    urls = await discover_logging_urls()
+    urls = await logging_instance_urls()
     if not urls:
-        raise HTTPException(
-            status_code=503,
-            detail="No logging-service instances discovered in Kubernetes",
-        )
-    client: httpx.AsyncClient = app.state.client
-    k8s: KubernetesApiClient = app.state.k8s
+        raise ValueError("No logging-service instances (config-server empty and no LOGGING_URLS)")
+    ordered = _shuffled_urls(urls)
     last_error: Exception | None = None
-    for base in _shuffled(urls):
+    for base in ordered:
         url = f"{base.rstrip('/')}{path}"
         try:
-            resp = await client.request(
-                method, url, json=payload, timeout=LOGGING_HTTP_TIMEOUT
-            )
+            resp = await request_json(method, url, payload)
             if resp.is_success:
-                print(
-                    f"[{INSTANCE_ID}] logging {method} {path} -> {base} OK",
-                    flush=True,
-                )
                 return resp
             last_error = httpx.HTTPStatusError(
-                f"HTTP {resp.status_code}",
-                request=resp.request,
-                response=resp,
+                f"HTTP {resp.status_code}", request=resp.request, response=resp
             )
-        except Exception as exc:
-            last_error = exc
-            print(
-                f"[{INSTANCE_ID}] logging {method} {path} -> {base} FAILED: {exc}",
-                flush=True,
-            )
-            k8s.invalidate_service_cache(
-                LOGGING_SERVICE_NAME, LOGGING_SERVICE_PORT_NAME
-            )
-    raise HTTPException(
-        status_code=503,
-        detail=f"All logging-service instances unavailable: {last_error}",
-    )
+        except Exception as e:
+            last_error = e
+            continue
+    if last_error:
+        raise last_error
+    raise RuntimeError("No logging service available")
 
 
 async def counter_get_json(path: str) -> Dict[str, Any] | None:
-    urls = await discover_counter_urls()
+    urls = await counter_instance_urls()
     if not urls:
-        print(
-            f"[{INSTANCE_ID}] no counter-service instances discovered for {path}",
-            flush=True,
-        )
         return None
     client: httpx.AsyncClient = app.state.client
     metrics: Metrics = app.state.metrics
-    k8s: KubernetesApiClient = app.state.k8s
+    ordered = _shuffled_urls(urls)
     last_error: Exception | None = None
-    for base in _shuffled(urls):
+    for base in ordered:
         url = f"{base.rstrip('/')}{path}"
         start = time.perf_counter()
         try:
@@ -257,24 +234,14 @@ async def counter_get_json(path: str) -> Dict[str, Any] | None:
             if resp.is_success:
                 return resp.json()
             last_error = httpx.HTTPStatusError(
-                f"HTTP {resp.status_code}",
-                request=resp.request,
-                response=resp,
+                f"HTTP {resp.status_code}", request=resp.request, response=resp
             )
-        except Exception as exc:
+        except Exception as e:
             await metrics.add_counter(time.perf_counter() - start)
-            last_error = exc
-            print(
-                f"[{INSTANCE_ID}] counter GET {url} failed: {exc}",
-                flush=True,
-            )
-            k8s.invalidate_service_cache(
-                COUNTER_SERVICE_NAME, COUNTER_SERVICE_PORT_NAME
-            )
-    print(
-        f"[{INSTANCE_ID}] all counter-service instances failed for {path}: {last_error}",
-        flush=True,
-    )
+            last_error = e
+            continue
+    if last_error:
+        print(f"[facade] all counter instances failed for {path}: {last_error}")
     return None
 
 
@@ -311,9 +278,8 @@ async def get_user_summary(user_id: str) -> UserSummary:
     metrics: Metrics = app.state.metrics
 
     balance_data = await counter_get_json(f"/balance/{user_id}")
-    balance: int | None
     if balance_data is None:
-        balance = None
+        balance: int | None = None
     else:
         balance = int(balance_data.get("balance", 0))
 
@@ -337,45 +303,6 @@ async def get_accounts() -> Dict[str, Any]:
     return {"balances": data.get("balances", {})}
 
 
-@app.get("/services")
-async def list_services() -> Dict[str, Any]:
-    """Show which pods are currently registered behind each Kubernetes
-    Service, mimicking the "show registered services" Consul UI view.
-    """
-    k8s: KubernetesApiClient = app.state.k8s
-    targets = [
-        (SERVICE_NAME, FACADE_SERVICE_PORT_NAME),
-        (LOGGING_SERVICE_NAME, LOGGING_SERVICE_PORT_NAME),
-        (COUNTER_SERVICE_NAME, COUNTER_SERVICE_PORT_NAME),
-    ]
-    snapshot: Dict[str, Any] = {}
-    for service, port_name in targets:
-        instances = await k8s.get_service_instances(
-            service, port_name=port_name, use_cache=False
-        )
-        snapshot[service] = _serialize_instances(instances)
-    return {"namespace": k8s.namespace, "services": snapshot}
-
-
-def _serialize_instances(instances: List[ServiceInstance]) -> Dict[str, Any]:
-    ready = [
-        {"pod_name": i.pod_name, "address": i.host_port}
-        for i in instances
-        if i.ready
-    ]
-    not_ready = [
-        {"pod_name": i.pod_name, "address": i.host_port}
-        for i in instances
-        if not i.ready
-    ]
-    return {
-        "ready_instances": ready,
-        "not_ready_instances": not_ready,
-        "ready_count": len(ready),
-        "not_ready_count": len(not_ready),
-    }
-
-
 @app.get("/metrics")
 async def get_metrics() -> Dict[str, Any]:
     metrics: Metrics = app.state.metrics
@@ -387,8 +314,3 @@ async def reset_metrics() -> Dict[str, str]:
     metrics: Metrics = app.state.metrics
     await metrics.reset()
     return {"status": "ok"}
-
-
-@app.get("/health")
-async def health() -> Dict[str, str]:
-    return {"status": "ok", "instance_id": INSTANCE_ID}

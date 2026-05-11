@@ -1,26 +1,31 @@
 import asyncio
 import json
 import os
-import socket
 import threading
 from contextlib import asynccontextmanager
 from typing import Any, Dict
 
 import asyncpg
+import httpx
 import hazelcast
 from fastapi import FastAPI
 from pydantic import BaseModel
-
-from k8s_client import KubernetesApiClient
-
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:postgres@postgres:5432/postgres",
 )
+CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "").rstrip("/")
+SERVICE_BASE_URL = os.getenv("SERVICE_BASE_URL", "").rstrip("/")
 SERVICE_NAME = os.getenv("SERVICE_NAME", "counter-service")
-INSTANCE_ID = os.getenv("INSTANCE_ID", os.getenv("POD_NAME", socket.gethostname()))
-CONFIGMAP_NAME = os.getenv("APP_CONFIGMAP_NAME", "microservices-config")
+HAZELCAST_MEMBERS = [
+    m.strip() for m in os.getenv(
+        "HAZELCAST_MEMBERS", "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
+    ).split(",")
+    if m.strip()
+]
+HZ_CLUSTER_NAME = os.getenv("HZ_CLUSTER_NAME", "dev")
+QUEUE_NAME = os.getenv("HZ_QUEUE_NAME", "counter-updates")
 
 
 class UpdateRequest(BaseModel):
@@ -51,9 +56,8 @@ async def _apply_queued_item(pool: asyncpg.Pool, raw_item: Any) -> None:
             amount,
         )
     print(
-        f"[{INSTANCE_ID}] applied from queue user_id={user_id!r} amount={amount} "
-        f"transaction_id={data.get('transaction_id')!r}",
-        flush=True,
+        f"[counter-service] applied from queue user_id={user_id!r} amount={amount} "
+        f"transaction_id={data.get('transaction_id')!r}"
     )
 
 
@@ -61,58 +65,37 @@ def _consumer_loop(
     pool: asyncpg.Pool,
     loop: asyncio.AbstractEventLoop,
     shutdown: threading.Event,
-    cluster_name: str,
-    members: list[str],
-    queue_name: str,
 ) -> None:
-    print(
-        f"[{INSTANCE_ID}] queue consumer starting cluster={cluster_name!r} "
-        f"members={members} queue={queue_name!r}",
-        flush=True,
-    )
+    print(f"[counter-service] queue consumer starting queue={QUEUE_NAME!r}")
     reconnect_delay_seconds = 1.0
     max_reconnect_delay_seconds = 10.0
     while not shutdown.is_set():
         hz = None
         try:
             hz = hazelcast.HazelcastClient(
-                cluster_members=members,
-                cluster_name=cluster_name,
+                cluster_members=HAZELCAST_MEMBERS,
+                cluster_name=HZ_CLUSTER_NAME,
             )
-            q = hz.get_queue(queue_name).blocking()
+            q = hz.get_queue(QUEUE_NAME).blocking()
             reconnect_delay_seconds = 1.0
-            print(
-                f"[{INSTANCE_ID}] queue consumer connected to Hazelcast",
-                flush=True,
-            )
+            print("[counter-service] queue consumer connected to Hazelcast")
             while not shutdown.is_set():
                 try:
                     item = q.poll(1.0)
-                except Exception as exc:
+                except Exception as e:
                     if not shutdown.is_set():
-                        print(
-                            f"[{INSTANCE_ID}] queue poll failed, reconnecting: {exc}",
-                            flush=True,
-                        )
+                        print(f"[counter-service] queue poll failed, reconnecting: {e}")
                     break
                 if item is None:
                     continue
                 try:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        _apply_queued_item(pool, item), loop
-                    )
+                    fut = asyncio.run_coroutine_threadsafe(_apply_queued_item(pool, item), loop)
                     fut.result(timeout=120)
-                except Exception as exc:
-                    print(
-                        f"[{INSTANCE_ID}] queue item failed: {exc}",
-                        flush=True,
-                    )
-        except Exception as exc:
+                except Exception as e:
+                    print(f"[counter-service] queue item failed: {e}")
+        except Exception as e:
             if not shutdown.is_set():
-                print(
-                    f"[{INSTANCE_ID}] queue consumer connection failed: {exc}",
-                    flush=True,
-                )
+                print(f"[counter-service] queue consumer connection failed: {e}")
         finally:
             if hz is not None:
                 try:
@@ -122,21 +105,36 @@ def _consumer_loop(
         if shutdown.is_set():
             break
         print(
-            f"[{INSTANCE_ID}] queue consumer retry in {reconnect_delay_seconds:.1f}s",
-            flush=True,
+            f"[counter-service] queue consumer retry in {reconnect_delay_seconds:.1f}s"
         )
         shutdown.wait(reconnect_delay_seconds)
         reconnect_delay_seconds = min(
             reconnect_delay_seconds * 2.0,
             max_reconnect_delay_seconds,
         )
-    print(f"[{INSTANCE_ID}] queue consumer stopped", flush=True)
+    print("[counter-service] queue consumer stopped")
+
+
+async def _register_with_config() -> None:
+    if not CONFIG_SERVER_URL or not SERVICE_BASE_URL:
+        print("[counter-service] skipping config registration (missing env)")
+        return
+    url = f"{CONFIG_SERVER_URL}/register"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                json={"service": SERVICE_NAME, "url": SERVICE_BASE_URL},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+        print(f"[counter-service] registered at config-server as {SERVICE_BASE_URL!r}")
+    except Exception as e:
+        print(f"[counter-service] config registration failed: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(f"[{INSTANCE_ID}] Starting counter-service ...", flush=True)
-
     pool = await asyncpg.create_pool(
         DATABASE_URL,
         min_size=1,
@@ -153,45 +151,24 @@ async def lifespan(app: FastAPI):
             """
         )
     app.state.pool = pool
-
-    k8s = KubernetesApiClient()
-    app.state.k8s = k8s
-    cluster_name = await k8s.get_config_value_with_retry(
-        CONFIGMAP_NAME, "hazelcast.cluster_name"
-    )
-    members_raw = await k8s.get_config_value_with_retry(
-        CONFIGMAP_NAME, "hazelcast.members"
-    )
-    queue_name = await k8s.get_config_value_with_retry(
-        CONFIGMAP_NAME, "hazelcast.queue_name"
-    )
-    members = [m.strip() for m in members_raw.split(",") if m.strip()]
-    print(
-        f"[{INSTANCE_ID}] Loaded MQ config from ConfigMap '{CONFIGMAP_NAME}': "
-        f"cluster_name={cluster_name!r} members={members} queue={queue_name!r}",
-        flush=True,
-    )
-
     shutdown = threading.Event()
     loop = asyncio.get_running_loop()
     consumer = threading.Thread(
         target=_consumer_loop,
-        args=(pool, loop, shutdown, cluster_name, members, queue_name),
+        args=(pool, loop, shutdown),
         name="hz-queue-consumer",
         daemon=True,
     )
     consumer.start()
     app.state.consumer_shutdown = shutdown
     app.state.consumer_thread = consumer
+    await _register_with_config()
     try:
         yield
     finally:
-        print(f"[{INSTANCE_ID}] Shutting down ...", flush=True)
         shutdown.set()
         consumer.join(timeout=15.0)
-        await k8s.close()
         await pool.close()
-        print(f"[{INSTANCE_ID}] Shutdown complete", flush=True)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -199,6 +176,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/update")
 async def update_balance(payload: UpdateRequest) -> Dict[str, int]:
+    """Optional direct HTTP update (not used by facade in the MQ lab)."""
     pool = app.state.pool
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -239,4 +217,4 @@ async def get_balances() -> Dict[str, Dict[str, int]]:
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
-    return {"status": "ok", "instance_id": INSTANCE_ID}
+    return {"status": "ok"}
